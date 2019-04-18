@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import List
 
 from aiorpc import start_rpc_server, configure, get_key_enc
+
 from . import get_config, config_logging
 
 
@@ -27,7 +28,10 @@ def main(argv: List[str]) -> int:
 
     if opts.subparser_name == 'server':
         configure(historic_ops=cfg.historic_ops, historic_ops_cfg=cfg.historic_ops_cfg)
-        start_rpc_server(ip=cfg.listen_ip, ssl_cert=cfg.ssl_cert, key=cfg.ssl_key, api_key_enc=cfg.api_key_enc,
+        start_rpc_server(ip=cfg.listen_ip,
+                         ssl_cert=cfg.ssl_cert,
+                         ssl_key=cfg.ssl_key,
+                         api_key_enc=cfg.api_key_enc.open().read(),
                          port=cfg.server_port)
     elif opts.subparser_name == 'gen_key':
         key, enc_key = get_key_enc()

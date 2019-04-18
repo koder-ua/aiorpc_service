@@ -6,6 +6,7 @@ set -o nounset
 readonly ARCHNAME="${0}"
 readonly CMD="${1:-}"
 readonly INSTALL_ROOT_MARKER=".install_root"
+readonly TAR_OPT="{FILL_TAR_OPT}"
 
 function help() {
     echo "${ARCHNAME} --list|--help|-h|--install [INSTALLATION_PATH(%DEFPATH%)]"
@@ -19,7 +20,7 @@ fi
 readonly ARCH_CONTENT_POS=$(awk '/^__ARCHIVE_BELOW__/ {print NR + 1; exit 0; }' "${ARCHNAME}")
 
 if [[ "${CMD}" == "--list" ]] ; then
-    tail "--lines=+${ARCH_CONTENT_POS}" "${ARCHNAME}" | tar --xz --list --verbose
+    tail "--lines=+${ARCH_CONTENT_POS}" "${ARCHNAME}" | tar "${TAR_OPT}" --list --verbose
     exit 0
 fi
 
@@ -32,7 +33,7 @@ if [[ "${CMD}" == "--install" ]] ; then
     fi
 
     mkdir --parents "${INSTALL_PATH}"
-    tail "--lines=+${ARCH_CONTENT_POS}" "${ARCHNAME}" | tar --extract --xz --directory "${INSTALL_PATH}"
+    tail "--lines=+${ARCH_CONTENT_POS}" "${ARCHNAME}" | tar --extract "${TAR_OPT}" --directory "${INSTALL_PATH}"
     cp "${ARCHNAME}" "${INSTALL_PATH}/distribution.sh"
     touch "${INSTALL_PATH}/${INSTALL_ROOT_MARKER}"
     exit 0

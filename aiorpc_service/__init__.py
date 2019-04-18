@@ -3,9 +3,10 @@ import configparser
 import logging.config
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional
 
 from koder_utils import RAttredDict
+from aiorpc import get_http_connection_pool, ConnectionPool
 
 
 files_folder = 'aiorpc_service_files'
@@ -15,12 +16,16 @@ logger = logging.getLogger("aiorpc_svc")
 service_name = 'aiorpc.service'
 
 
+# development hack
+INSTALL_PATH = Path(__file__).parent
+
+
 def find_in_top_tree(name: str, _cache: Dict[str, Path] = {}) -> Path:
     if name not in _cache:
-        cpath = Path(__file__).parent
+        cpath = INSTALL_PATH
         while not (cpath.parent / name).exists():
             if cpath == cpath.parent:
-                raise RuntimeError(f"Can't find {name} folder in tree up from {Path(__file__).parent}")
+                raise FileExistsError(f"Can't find {name} folder in tree up from {Path(__file__).parent}")
             cpath = cpath.parent
         _cache[name] = cpath.parent / name
     return _cache[name]
@@ -62,30 +67,42 @@ class AIORPCServiceConfig:
     api_key_enc: Path
     historic_ops: Path
     historic_ops_cfg: Path
-    inventory: Path
     api_key: Path
     ssl_cert_templ: Path
-    max_conn: int
+    max_conn_per_node: int
+    max_conn_total: int
     distribution_file: Path
     raw: configparser.ConfigParser
     rraw: Any
 
 
+def get_config_target_path() -> Path:
+    return get_installation_root() / 'aiorpc_config.cfg'
+
+
+def get_inventory_path() -> Path:
+    return get_installation_root() / 'inventory'
+
+
 def get_config_default_path() -> Optional[Path]:
-    try:
-        return get_file('config.cfg')
-    except RuntimeError:
-        return None
+    root_cfg = get_config_target_path()
+    if root_cfg.exists():
+        return root_cfg
+    else:
+        try:
+            return get_file('config.cfg')
+        except FileExistsError:
+            return None
 
 
-def get_config(path: Path = None, *, install_root: Path = None) -> AIORPCServiceConfig:
+def get_config(path: Path = None) -> AIORPCServiceConfig:
     cfg = configparser.ConfigParser()
 
     if not path:
-        path = get_file('config.cfg')
+        path = get_config_default_path()
 
-    if not path.exists():
-        raise RuntimeError(f"Can't find config file at {path}")
+    if path is None or not path.exists():
+        raise FileExistsError(f"Can't find config file at {path}")
 
     cfg.read_file(path.open())
 
@@ -94,12 +111,7 @@ def get_config(path: Path = None, *, install_root: Path = None) -> AIORPCService
     common = rcfg.common
     server = rcfg.server
 
-    if common.root == 'AUTO':
-        if install_root is None:
-            install_root = get_installation_root()
-        path_formatters: Dict[str, str] = {'root': install_root}
-    else:
-        path_formatters: Dict[str, str] = {'root': common.root}
+    path_formatters: Dict[str, Any] = {'root': get_installation_root() if common.root == 'AUTO' else common.root}
 
     for name, val in [('secrets', common.secrets), ('storage', server.storage)]:
         path_formatters[name] = val.format(**path_formatters)
@@ -129,17 +141,16 @@ def get_config(path: Path = None, *, install_root: Path = None) -> AIORPCService
         persistent_log_level=persistent_log_level,
         listen_ip=server.listen_ip,
         service_name=service_name,
-        service=get_file(f"{service_name}.service"),
+        service=get_file(f"{service_name}"),
         ssl_cert=mkpath(server.ssl_cert),
         ssl_key=mkpath(server.ssl_key),
         api_key_enc=mkpath(server.api_key_enc),
         historic_ops=mkpath(server.historic_ops),
         historic_ops_cfg=mkpath(server.historic_ops_cfg),
-
-        inventory=mkpath(rcfg.client.inventory),
         api_key=mkpath(rcfg.client.api_key),
         ssl_cert_templ=mkpath(rcfg.client.ssl_cert_templ),
-        max_conn=int(rcfg.client.max_conn),
+        max_conn_total=int(rcfg.client.max_conn_total),
+        max_conn_per_node=int(rcfg.client.max_conn_per_node),
 
         distribution_file=mkpath(rcfg.deploy.distribution_file),
 
@@ -182,3 +193,12 @@ def config_logging(cfg: AIORPCServiceConfig, no_persistent: bool = False):
     log_config['handlers']['console']['level'] = cfg.log_level
     logging.config.dictConfig(log_config)
 
+
+def get_http_conn_pool_from_cfg(cfg: AIORPCServiceConfig = None) -> ConnectionPool:
+    if cfg is None:
+        cfg = get_config()
+
+    certs = get_certificates(cfg.ssl_cert_templ)
+    return get_http_connection_pool(certs, cfg.api_key.open().read(),
+                                    max_conn_per_node=cfg.max_conn_per_node,
+                                    max_conn_total=cfg.max_conn_total)

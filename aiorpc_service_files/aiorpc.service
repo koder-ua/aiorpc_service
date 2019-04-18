@@ -1,11 +1,11 @@
 [Unit]
-Description=Mirantis rpc agent
+Description=Aiorpc server
 
 [Service]
 WorkingDirectory={INSTALL}
-Environment="PYTHONUNBUFFERED=1" "PYTHONPATH={INSTALL}"
+Environment="PYTHONUNBUFFERED=1"
 Type=simple
-ExecStart="{INSTALL}/python/python3.7" -m agent.server server --config '{CONFIG_PATH}'
+ExecStart="{INSTALL}/usr/bin/python3.7" -m aiorpc_service.server server --config '{CONFIG_PATH}'
 StandardOutput=null
 
 [Install]

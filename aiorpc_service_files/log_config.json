@@ -26,7 +26,8 @@
         "storage": {"level": "DEBUG", "handlers": ["console"]},
         "rpc":     {"level": "DEBUG", "handlers": ["console"]},
         "cephlib": {"level": "DEBUG", "handlers": ["console"]},
-        "agent":   {"level": "DEBUG", "handlers": ["console"]},
-        "aiorpc_svc": {"level": "DEBUG", "handlers": ["console"]}
+        "aiorpc":  {"level": "DEBUG", "handlers": ["console"]},
+        "aiorpc_svc": {"level": "DEBUG", "handlers": ["console"]},
+        "aiohttp.server": {"level": "DEBUG", "handlers": ["console"]}
     }
 }

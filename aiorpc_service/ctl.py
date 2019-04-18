@@ -1,4 +1,3 @@
-import re
 import sys
 import uuid
 import asyncio
@@ -8,11 +7,11 @@ import subprocess
 from pathlib import Path
 from typing import List, Any
 
-from koder_utils import SSH, read_inventory, make_secure, make_cert_and_key, rpc_map, b2ssize
+from koder_utils import SSH, make_secure, make_cert_and_key, rpc_map, b2ssize, read_inventory
 from aiorpc import get_http_connection_pool, get_key_enc, IAOIRPCNode
 
 from . import (get_config, get_config_default_path, AIORPCServiceConfig, config_logging, logger, get_certificates,
-               get_installation_root)
+               get_installation_root, get_config_target_path, get_inventory_path)
 
 
 SERVICE_FILE_DIR = Path("/lib/systemd/system")
@@ -61,11 +60,9 @@ async def remove(cfg: AIORPCServiceConfig, nodes: List[SSH]):
         await node.run(["sudo", "rm", "--force", str(service_target)])
         await node.run(["sudo", "systemctl", "daemon-reload"])
 
-        logger.info("Removing files")
+        logger.info(f"Removing files from {node.node}")
 
         for folder in (agent_folder, cfg.storage):
-            assert re.match(r"/[a-zA-Z0-9_/-]+/rpc_agent$", str(folder)), \
-                f"{folder} not match re of allowed to rm path"
             await node.run(["sudo", "rm", "--preserve-root", "--recursive", "--force", str(folder)])
 
     for node, val in zip(nodes, await asyncio.gather(*map(runner, nodes), return_exceptions=True)):
@@ -73,9 +70,20 @@ async def remove(cfg: AIORPCServiceConfig, nodes: List[SSH]):
             assert isinstance(val, Exception)
             logger.error(f"Failed on node {node} with message: {val!s}")
 
+    logger.info(f"Removing local config and inventory")
+    if get_config_target_path().exists():
+        get_config_target_path().unlink()
+
+    if get_inventory_path().exists():
+        get_inventory_path().unlink()
+
 
 async def deploy(cfg: AIORPCServiceConfig, nodes: List[SSH], max_parallel_uploads: int, inventory: List[str]):
     logger.info(f"Start deploying on nodes: {' '.join(inventory)}")
+
+    if cfg.config != get_config_target_path():
+        logger.info(f"Copying config to: {get_config_target_path()}")
+        get_config_target_path().open("w").write(cfg.config.open().read())
 
     upload_semaphore = asyncio.Semaphore(max_parallel_uploads if max_parallel_uploads else len(nodes))
 
@@ -144,21 +152,20 @@ async def deploy(cfg: AIORPCServiceConfig, nodes: List[SSH], max_parallel_upload
     await enable(cfg.service_name, nodes)
     await start(cfg.service_name, nodes)
 
-    if not cfg.inventory.exists() and inventory:
-        with cfg.inventory.open("w") as fd:
-            fd.write("\n".join(inventory))
+    with get_inventory_path().open("w") as fd:
+        fd.write("\n".join(inventory) + "\n")
 
 
 # --------------- RPC BASED CONTROLS FUNCTIONS -------------------------------------------------------------------------
 
 
 async def check_node(conn: IAOIRPCNode, hostname: str) -> bool:
-    return await conn.proxy.sys.ping("test", _call_timeout=5) == 'test'
+    return await conn.proxy.sys.ping("test") == 'test'
 
 
 async def status(cfg: AIORPCServiceConfig, nodes: List[str]) -> None:
     ssl_certs = get_certificates(cfg.ssl_cert_templ)
-    pool_am = get_http_connection_pool(ssl_certs, cfg.api_key.open().read(), cfg.max_conn, port=cfg.server_port)
+    pool_am = get_http_connection_pool(ssl_certs, cfg.api_key.open().read(), cfg.max_conn_per_node, port=cfg.server_port)
     async with pool_am as pool:
         max_node_name_len = max(map(len, nodes))
         async for node_name, res in rpc_map(pool, check_node, nodes):
@@ -169,48 +176,64 @@ async def status(cfg: AIORPCServiceConfig, nodes: List[str]) -> None:
 
 
 def parse_args(argv: List[str]) -> Any:
+    try:
+        inst_root = get_installation_root()
+        cfg_def_path = get_config_default_path()
+    except RuntimeError:
+        inst_root = None
+        cfg_def_path = None
+
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     subparsers = parser.add_subparsers(dest='subparser_name')
 
     deploy_parser = subparsers.add_parser('install', help='Deploy agent on nodes from inventory')
     deploy_parser.add_argument("--max-parallel-uploads", default=0, type=int,
                                help="Max parallel archive uploads to target nodes (default: %(default)s)")
-    deploy_parser.add_argument("--target", metavar='TARGET_FOLDER',
-                               default=get_installation_root(),
-                               help="Path to deploy agent to on target nodes (default: %(default)s)")
+    if inst_root:
+        deploy_parser.add_argument("--target", metavar='TARGET_FOLDER', default=inst_root,
+                                   help="Path to deploy agent to on target nodes (default: %(default)s)")
+    else:
+        deploy_parser.add_argument("--target", metavar='TARGET_FOLDER', required=True,
+                                   help="Path to deploy agent to on target nodes (default: %(default)s)")
+
+    deploy_parser.add_argument("--inventory", metavar='INVENTORY_FILE', required=True, type=Path,
+                               help="Path to file with list of ssh ip/names of ceph nodes")
 
     stop_parser = subparsers.add_parser('stop', help='Stop daemons')
     start_parser = subparsers.add_parser('start', help='Start daemons')
     remove_parser = subparsers.add_parser('uninstall', help='Remove service')
 
     for sbp in (deploy_parser, start_parser, stop_parser, remove_parser):
-        sbp.add_argument("--ssh-user", metavar='SSH_USER',
-                         default=getpass.getuser(),
+        sbp.add_argument("--ssh-user", metavar='SSH_USER', default=getpass.getuser(),
                          help="SSH user, (default: %(default)s)")
 
     status_parser = subparsers.add_parser('status', help='Show daemons statuses')
     for sbp in (deploy_parser, start_parser, stop_parser, status_parser, remove_parser):
-        sbp.add_argument("--inventory", metavar='INVENTORY_FILE', default=None,
-                         help="Path to file with list of ssh ip/names of ceph nodes")
-        sbp.add_argument("--config", metavar='CONFIG_FILE', default=get_config_default_path(),
-                         help="Config file path (default: %(default)s)")
+        if cfg_def_path:
+            sbp.add_argument("--config", metavar='CONFIG_FILE', default=cfg_def_path,
+                             help="Config file path (default: %(default)s)")
+        else:
+            sbp.add_argument("--config", metavar='CONFIG_FILE', required=True,
+                             help="Config file path (default: %(default)s)")
 
     return parser.parse_args(argv[1:])
 
 
 def main(argv: List[str]) -> int:
     opts = parse_args(argv)
+
     cfg = get_config(opts.config)
     config_logging(cfg, no_persistent=True)
 
-    if opts.inventory:
-        inventory = read_inventory(opts.inventory)
-    else:
-        inventory = read_inventory(str(cfg.inventory))
-
     if opts.subparser_name == 'status':
+        inventory = read_inventory(get_inventory_path())
         asyncio.run(status(cfg, inventory))
         return 0
+
+    if opts.subparser_name == 'install':
+        inventory = read_inventory(opts.inventory)
+    else:
+        inventory = read_inventory(get_inventory_path())
 
     nodes = [SSH(name_or_ip, ssh_user=opts.ssh_user) for name_or_ip in inventory]
     if opts.subparser_name == 'install':
